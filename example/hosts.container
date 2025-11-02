@@ -57,7 +57,7 @@ NODE_PORT_RANGE="30000-32767"
 CLUSTER_DNS_DOMAIN="cluster.local"
 
 # KIND specific configurations
-KIND_CLUSTER_NAME="kubeasz-container"
+KIND_CLUSTER_NAME="kubeasz-kind"
 KIND_NODE_IMAGE="kindest/node:v1.31.0"
 KIND_CONFIG_PATH="/tmp/kind-config.yaml"
 

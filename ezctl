@@ -216,70 +216,110 @@ function setup() {
           PLAY_BOOK="05.kube-node.yml"
           ;;
       (06|network)
-          PLAY_BOOK="06.network.yml"
-          ;;
-      (07|cluster-addon)
-          PLAY_BOOK="07.cluster-addon.yml"
-          ;;
-      (90|all)
-          PLAY_BOOK="90.setup.yml"
-          ;;
-      (10|ex-lb)
-          PLAY_BOOK="10.ex-lb.yml"
-          ;;
-      (11|harbor)
-          PLAY_BOOK="11.harbor.yml"
-          ;;
-      (*)
-          usage-setup
-          exit 1
-          ;;
-    esac
-
-    COMMAND="ansible-playbook -i clusters/$1/hosts -e @clusters/$1/config.yml $EXTRA_ARGS playbooks/$PLAY_BOOK"
-    echo "$COMMAND"
-
-    k8s_ver=$(bin/kube-apiserver --version|cut -d' ' -f2)
-    etcd_ver=v$(bin/etcd --version|grep 'etcd Version'|cut -d' ' -f3)
-    network_cni=$(grep CLUSTER_NETWORK "clusters/$1/hosts"|cut -d'"' -f2|sed 's/-//g')
-    network_cni_ver=$(grep -i "${network_cni}Ver" ezdown|cut -d'=' -f2|head -n1)
-
-    cat <<EOF
-*** Component Version *********************
-*******************************************
-*   kubernetes: ${k8s_ver}
-*   etcd: ${etcd_ver}
-*   ${network_cni}: ${network_cni_ver}
-*******************************************
-EOF
-
-    logger info "cluster:$1 setup step:$2 begins in 5s, press any key to abort:\n"
-    ! (read -r -t5 -n1) || { logger warn "setup abort"; return 1; }
-
-    ${COMMAND} || return 1
-}
-
-function cmd() {
-    [[ -d "clusters/$1" ]] || { logger error "invalid config, run 'ezctl new $1' first"; return 1; }
-
-    PLAY_BOOK="dummy.yml"
-    case "$2" in
-      (start)
-          PLAY_BOOK="91.start.yml"
-          ;;
-      (stop)
-          PLAY_BOOK="92.stop.yml"
-          ;;
-      (upgrade)
-          PLAY_BOOK="93.upgrade.yml"
-          ;;
-      (backup)
-          PLAY_BOOK="94.backup.yml"
-          ;;
-      (restore)
-          PLAY_BOOK="95.restore.yml"
-          ;;
+        # Apply Calico network plugin
+        logger info "Installing Calico network plugin..."
+        # Robust handling for very large CRDs in tigera manifest:
+        #  - download the manifest to a tempdir
+        #  - split into documents and extract the installations.operator.tigera.io CRD if present
+        #  - if CRD exists in manifest and not in cluster, create it first with `kubectl create -f`
+        #  - apply remaining docs
+        TIGERA_URL="https://raw.githubusercontent.com/projectcalico/calico/v3.28.4/manifests/tigera-operator.yaml"
+        TMPDIR=$(mktemp -d || true)
+        if [[ -z "$TMPDIR" ]]; then
+            logger warn "failed to create tempdir, falling back to direct apply"
+            kubectl apply -f "$TIGERA_URL" || logger error "failed to apply tigera manifest"
+        else
+            if ! curl -sSL "$TIGERA_URL" -o "$TMPDIR/tigera.yaml"; then
+                logger warn "failed to download $TIGERA_URL, falling back to remote apply"
+                kubectl apply -f "$TIGERA_URL" || logger error "failed to apply tigera manifest"
+                rm -rf "$TMPDIR"
+            else
+                # Use Python to split docs reliably and write: installations-crd.yaml and tigera-no-installations.yaml
+                python3 - <<'PY'
+    import os
+    fn = os.environ.get('TMPDIR') + '/tigera.yaml'
+    text = open(fn, 'r', encoding='utf-8').read()
+    docs = text.split('\n---\n')
+    crd = None
+    rest = []
+    for d in docs:
+        if 'installations.operator.tigera.io' in d:
+            crd = d
+        else:
+            rest.append(d)
+    td = os.environ.get('TMPDIR')
+    if crd:
+        open(td + '/installations-crd.yaml', 'w', encoding='utf-8').write(crd)
+    open(td + '/tigera-no-installations.yaml', 'w', encoding='utf-8').write('\n---\n'.join(rest))
+    print('SPLIT_DONE')
+    PY
+                # If CRD exists in manifest and not on cluster, create it first
+                if [[ -f "$TMPDIR/installations-crd.yaml" ]]; then
+                    if ! kubectl get crd installations.operator.tigera.io >/dev/null 2>&1; then
+                        logger info "installations.operator.tigera.io found in manifest and not present in cluster — creating CRD first"
+                        if ! kubectl create -f "$TMPDIR/installations-crd.yaml" 2>/dev/null; then
+                            logger warn "creating installations CRD failed; will attempt to apply full manifest as fallback"
+                            kubectl apply -f "$TMPDIR/tigera.yaml" 2>&1 | tee /tmp/tigera_apply.$$ || true
+                            if grep -q "metadata.annotations: Too long" /tmp/tigera_apply.$$ 2>/dev/null || grep -qi "Too long: must have at most" /tmp/tigera_apply.$$ 2>/dev/null; then
+                                logger warn "apply failed due to large annotation even after fallback; you may need to create CRD manually"
+                            fi
+                            rm -rf "$TMPDIR"
+                        else
+                            # CRD created; apply remaining docs (which excludes the large CRD doc)
+                            if [[ -s "$TMPDIR/tigera-no-installations.yaml" ]]; then
+                                kubectl apply -f "$TMPDIR/tigera-no-installations.yaml" 2>&1 | tee /tmp/tigera_apply.$$ || true
+                                if grep -q "metadata.annotations: Too long" /tmp/tigera_apply.$$ 2>/dev/null || grep -qi "Too long: must have at most" /tmp/tigera_apply.$$ 2>/dev/null; then
+                                    logger warn "apply reported annotation-too-long even after creating CRD; check /tmp/tigera_apply.$$ for details"
+                                fi
+                            else
+                                # nothing else to apply
+                                logger debug "no remaining docs to apply after extracting CRD"
+                            fi
+                            rm -rf "$TMPDIR"
+                        fi
+                    else
+                        # CRD already exists; apply full manifest normally
+                        kubectl apply -f "$TMPDIR/tigera.yaml" 2>&1 | tee /tmp/tigera_apply.$$ || true
+                        if grep -q "metadata.annotations: Too long" /tmp/tigera_apply.$$ 2>/dev/null || grep -qi "Too long: must have at most" /tmp/tigera_apply.$$ 2>/dev/null; then
+                            logger warn "apply failed because of large annotation; attempting to create CRD separately and reapply"
+                            kubectl create -f "$TMPDIR/installations-crd.yaml" || true
+                            if [[ -s "$TMPDIR/tigera-no-installations.yaml" ]]; then
+                                kubectl apply -f "$TMPDIR/tigera-no-installations.yaml" || true
+                            fi
+                        fi
+                        rm -rf "$TMPDIR"
+                    fi
+                else
+                    # no separate CRD found in manifest — try applying full manifest; on annotation-too-large error, report
+                    kubectl apply -f "$TMPDIR/tigera.yaml" 2>&1 | tee /tmp/tigera_apply.$$ || true
+                    if grep -q "metadata.annotations: Too long" /tmp/tigera_apply.$$ 2>/dev/null || grep -qi "Too long: must have at most" /tmp/tigera_apply.$$ 2>/dev/null; then
+                        logger warn "apply failed due to large annotation; attempt to extract CRD and retry"
+                        # attempt to extract installations CRD as a fallback and create it
+                        python3 - <<'PY'
+    import os
+    text=open(os.environ['TMPDIR']+'/tigera.yaml','r',encoding='utf-8').read()
       (destroy)
+    for d in docs:
+        if 'installations.operator.tigera.io' in d:
+            open(os.environ['TMPDIR']+'/installations-crd.yaml','w',encoding='utf-8').write(d)
+            break
+    print('EXTRACTED')
+    PY
+                        if [[ -f "$TMPDIR/installations-crd.yaml" ]]; then
+                            kubectl create -f "$TMPDIR/installations-crd.yaml" || true
+                            if [[ -s "$TMPDIR/tigera-no-installations.yaml" ]]; then
+                                kubectl apply -f "$TMPDIR/tigera-no-installations.yaml" || true
+                            else
+                                kubectl apply -f "$TMPDIR/tigera.yaml" || true
+                            fi
+                        else
+                            logger error "failed to extract installations CRD from manifest; manual intervention may be required"
+                        fi
+                    fi
+                    rm -rf "$TMPDIR"
+                fi
+            fi
+        fi
           PLAY_BOOK="99.clean.yml"
           ;;
       (*)
@@ -517,23 +557,88 @@ function start-container(){
 
         sed -i "s/_cluster_name_/container/g" "clusters/container/hosts"
     
+        # Determine KIND cluster name (allow override from clusters/container/hosts)
+        KIND_CLUSTER_NAME_DEFAULT="kubeasz-container"
+        KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME_DEFAULT"
+        if [[ -f "clusters/container/hosts" ]]; then
+            # extract line like: KIND_CLUSTER_NAME="name"
+            VAL=$(grep -E '^KIND_CLUSTER_NAME=' "clusters/container/hosts" 2>/dev/null | head -n1 | cut -d'=' -f2- || true)
+            if [[ -n "$VAL" ]]; then
+                # Trim whitespace
+                VAL=$(echo "$VAL" | sed 's/^\s*//; s/\s*$//')
+                # Remove surrounding quotes if present (single or double)
+                first_char=${VAL:0:1}
+                last_char=${VAL: -1}
+                if [[ "$first_char" == '"' || "$first_char" == "'" ]]; then
+                    VAL=${VAL:1}
+                fi
+                if [[ "$last_char" == '"' || "$last_char" == "'" ]]; then
+                    VAL=${VAL:0:${#VAL}-1}
+                fi
+                KIND_CLUSTER_NAME="$VAL"
+            fi
+        fi
+
         # Check for port conflicts before creating KIND cluster
         PUBLISH_PORTS=(6443 80 443 30000 30001 30002)
         USED_PORTS=()
+        # Collect currently listening ports in a robust way (handles IPv4, IPv6 and '*' formats)
+        mapfile -t LISTEN_PORTS < <(ss -ltnp 2>/dev/null | awk '{print $4}' | awk -F: '{print $NF}' | sort -u)
         for p in "${PUBLISH_PORTS[@]}"; do
-            if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ":${p}$"; then
+            if printf '%s\n' "${LISTEN_PORTS[@]}" | grep -xq "$p"; then
                 USED_PORTS+=("$p")
             fi
         done
         if [[ ${#USED_PORTS[@]} -gt 0 ]]; then
             logger error "port(s) in use: ${USED_PORTS[*]}. Free these ports or adjust 'clusters/container/kind-config.yaml' to avoid host port mappings before running start-container."
+            logger info "Processes listening on the conflicting ports (if any):"
+            # show details to help user free the ports
+            ss -ltnp 2>/dev/null | grep -E ':(6443|80|443|30000|30001|30002)' || true
             return 1
         fi
 
         # Create KIND cluster
-            logger info "Creating KIND cluster..."
-            # capture output to detect port-bind failures and provide actionable suggestions
-            if ! (kind create cluster --config="clusters/container/kind-config.yaml" --name=kubeasz-container) 2>&1 | tee /tmp/kind_create_output.$$; then
+                        logger info "Creating KIND cluster..."
+                        # If we are running inside a container (PID 1 is not systemd), kind's docker
+                        # invocations may include `--cgroupns=private` which fails when systemd is
+                        # not available. In that case create a temporary docker wrapper that strips
+                        # the `--cgroupns=private` flag from docker arguments for the duration of
+                        # the kind create command.
+                        IN_CONTAINER=false
+                        if [[ "$(ps -p 1 -o comm=)" != "systemd" ]]; then
+                                IN_CONTAINER=true
+                        fi
+
+            if $IN_CONTAINER; then
+                logger info "Detected containerized environment — installing in-place docker wrapper to remove --cgroupns=private"
+                REAL_DOCKER=$(command -v docker || true)
+                if [[ -n "$REAL_DOCKER" ]]; then
+                    REAL_BACKUP="${REAL_DOCKER}.orig-$$"
+                    # move real docker to backup and place wrapper at same path
+                    mv -f "$REAL_DOCKER" "$REAL_BACKUP" || true
+                    cat > "$REAL_DOCKER" <<'EOF'
+#!/bin/bash
+REAL_BIN="__REAL_BIN__"
+args=()
+for a in "$@"; do
+  if [[ "$a" == "--cgroupns=private" ]]; then
+    continue
+  fi
+  args+=("$a")
+done
+exec "$REAL_BIN" "${args[@]}"
+EOF
+                    sed -i "s|__REAL_BIN__|$REAL_BACKUP|" "$REAL_DOCKER"
+                    chmod +x "$REAL_DOCKER"
+                    # ensure restore on script exit
+                    trap 'if [[ -f "'"$REAL_BACKUP"'" ]]; then mv -f "'"$REAL_BACKUP"'" "'"$REAL_DOCKER"'" || true; fi' EXIT
+                else
+                    logger warn "docker not found; cannot install wrapper"
+                fi
+            fi
+
+                        # capture output to detect port-bind failures and provide actionable suggestions
+                        if ! (kind create cluster --config="clusters/container/kind-config.yaml" --name="$KIND_CLUSTER_NAME") 2>&1 | tee /tmp/kind_create_output.$$; then
                 if grep -qi "address already in use\|failed to listen on TCP socket" /tmp/kind_create_output.$$; then
                     logger error "KIND failed to start due to host port(s) being already in use."
                     logger info "Ports checked: 6443,80,443,30000-30002. Processes listening on these ports (if any):"
@@ -541,16 +646,18 @@ function start-container(){
                     logger info "Free the conflicting port(s) or edit 'clusters/container/kind-config.yaml' to avoid publishing host ports, then retry."
                 fi
                 rm -f /tmp/kind_create_output.$$ || true
+                # wrapper will be restored by EXIT trap if installed
                 return 1
             fi
             rm -f /tmp/kind_create_output.$$ || true
+            # wrapper will be restored by EXIT trap if installed
     
     # Wait for cluster to be ready
     logger info "Waiting for cluster to be ready..."
     kubectl wait --for=condition=Ready nodes --all --timeout=300s
     
     # Setup kubeconfig
-    kind export kubeconfig --name=kubeasz-container
+    kind export kubeconfig --name="$KIND_CLUSTER_NAME"
     
     # Apply basic cluster setup (network plugins, addons, etc.)
     logger info "Setting up cluster components..."
@@ -584,8 +691,67 @@ function setup-container-components(){
     
     # Apply Calico network plugin
     logger info "Installing Calico network plugin..."
-    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.4/manifests/tigera-operator.yaml
-    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.4/manifests/custom-resources.yaml
+    # Download tigera operator manifest first so we can handle very large CRDs (which may cause
+    # client-side `kubectl apply` to write too-large annotations). Strategy:
+    # 1. fetch manifest to a temp dir
+    # 2. split into individual docs and detect the installations.operator.tigera.io CRD
+    # 3. if CRD not present on cluster, create it with `kubectl create -f` to avoid large annotation writes
+    # 4. apply the whole manifest
+    TIGERA_URL="https://raw.githubusercontent.com/projectcalico/calico/v3.28.4/manifests/tigera-operator.yaml"
+    TMPDIR=$(mktemp -d || echo "")
+    if [[ -z "$TMPDIR" ]]; then
+        logger warn "failed to create tempdir, falling back to direct apply"
+        kubectl apply -f "$TIGERA_URL"
+    else
+        if curl -sSL "$TIGERA_URL" -o "$TMPDIR/tigera.yaml"; then
+            # split by document separator '---' into files doc_001.yaml ...
+            awk 'BEGIN{n=0;file=sprintf("%s/doc_%03d.yaml", ENVIRON["TMPDIR"], n)}
+                 /^---/ { n++; file=sprintf("%s/doc_%03d.yaml", ENVIRON["TMPDIR"], n); next }
+                 { print $0 >> file }
+                ' TMPDIR="$TMPDIR" "$TMPDIR/tigera.yaml"
+
+            CRD_FILE=""
+            for f in "$TMPDIR"/doc_*.yaml; do
+                # quick checks: kind CRD and the installations.operator.tigera.io name
+                if grep -q -E "^kind:\s*CustomResourceDefinition" "$f" 2>/dev/null && \
+                   grep -q "installations.operator.tigera.io" "$f" 2>/dev/null; then
+                    CRD_FILE="$f"
+                    break
+                fi
+            done
+
+            if [[ -n "$CRD_FILE" ]]; then
+                if ! kubectl get crd installations.operator.tigera.io >/dev/null 2>&1; then
+                    logger info "Found large CRD (installations.operator.tigera.io) in tigera manifest — creating it first"
+                    if ! kubectl create -f "$CRD_FILE"; then
+                        logger warn "create CRD failed, will fallback to applying full manifest directly"
+                        kubectl apply -f "$TMPDIR/tigera.yaml" || logger error "failed to apply tigera manifest"
+                        rm -rf "$TMPDIR"
+                    else
+                        # CRD created, now apply rest of manifest (safe)
+                        kubectl apply -f "$TMPDIR/tigera.yaml" || logger error "failed to apply tigera manifest"
+                        rm -rf "$TMPDIR"
+                    fi
+                else
+                    logger debug "CRD installations.operator.tigera.io already exists, applying full manifest"
+                    kubectl apply -f "$TMPDIR/tigera.yaml" || logger error "failed to apply tigera manifest"
+                    rm -rf "$TMPDIR"
+                fi
+            else
+                # couldn't find isolated CRD doc - apply remote manifest as before
+                logger debug "no large CRD detected in tigera manifest split, applying manifest"
+                kubectl apply -f "$TMPDIR/tigera.yaml" || {
+                    logger warn "local apply failed, fallback to remote apply"
+                    kubectl apply -f "$TIGERA_URL" || logger error "failed to apply tigera manifest"
+                }
+                rm -rf "$TMPDIR"
+            fi
+        else
+            logger warn "failed to download $TIGERA_URL, falling back to remote apply"
+            kubectl apply -f "$TIGERA_URL" || logger error "failed to apply tigera manifest"
+            rm -rf "$TMPDIR"
+        fi
+    fi
     
     # Wait for Calico to be ready
     kubectl wait --for=condition=Ready pods -l k8s-app=calico-node -n calico-system --timeout=300s

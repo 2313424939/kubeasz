@@ -1,7 +1,7 @@
 # KIND cluster configuration for kubeasz container deployment mode
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-name: kubeasz-container
+name: kubeasz-kind
 
 # Networking configuration
 networking:
@@ -28,26 +28,26 @@ nodes:
         node-labels: "ingress-ready=true"
   extraPortMappings:
   # Allow access to the API server from outside the container
-  - containerPort: 6443
-    hostPort: 6443
-    protocol: TCP
-  # Allow access to ingress controller
-  - containerPort: 80
-    hostPort: 80
-    protocol: TCP
-  - containerPort: 443
-    hostPort: 443
-    protocol: TCP
-  # Allow access to NodePort services
-  - containerPort: 30000
-    hostPort: 30000
-    protocol: TCP
-  - containerPort: 30001
-    hostPort: 30001
-    protocol: TCP
-  - containerPort: 30002
-    hostPort: 30002
-    protocol: TCP
+  # - containerPort: 6443
+  #   hostPort: 6443
+  #   protocol: TCP
+  # # Allow access to ingress controller
+  # - containerPort: 80
+  #   hostPort: 80
+  #   protocol: TCP
+  # - containerPort: 443
+  #   hostPort: 443
+  #   protocol: TCP
+  # # Allow access to NodePort services
+  # - containerPort: 30000
+  #   hostPort: 30000
+  #   protocol: TCP
+  # - containerPort: 30001
+  #   hostPort: 30001
+  #   protocol: TCP
+  # - containerPort: 30002
+  #   hostPort: 30002
+  #   protocol: TCP
 
 # Worker nodes (optional, can be scaled)
 - role: worker
