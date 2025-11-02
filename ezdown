@@ -750,21 +750,60 @@ function start_kubeasz_container_mode() {
       easzlab/kubeasz:${KUBEASZ_VER}
       
   # Install KIND and kubectl in the container
-  docker exec kubeasz-container bash -c "
+  docker exec kubeasz-container bash -c '
     # Install KIND
-    if ! command -v kind &> /dev/null; then
-      curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
-      chmod +x /tmp/kind
-      mv /tmp/kind /usr/local/bin/kind
+    if ! command -v kind >/dev/null 2>&1; then
+      if command -v curl >/dev/null 2>&1; then
+        curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+      elif command -v wget >/dev/null 2>&1; then
+        wget -O /tmp/kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+      else
+        # try to install curl via package manager inside container
+        if command -v apt-get >/dev/null 2>&1; then
+          apt-get update && apt-get install -y curl && curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+        elif command -v yum >/dev/null 2>&1; then
+          yum install -y curl && curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+        else
+          echo "ERROR: Neither curl nor wget available inside container and package manager not found" >&2
+        fi
+      fi
+      [ -f /tmp/kind ] && { chmod +x /tmp/kind && mv /tmp/kind /usr/local/bin/kind; }
     fi
-    
+
     # Install kubectl
-    if ! command -v kubectl &> /dev/null; then
-      curl -LO https://dl.k8s.io/release/\$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl
-      chmod +x kubectl
-      mv kubectl /usr/local/bin/kubectl
+    if ! command -v kubectl >/dev/null 2>&1; then
+      # try to get stable release tag
+      if command -v curl >/dev/null 2>&1; then
+        STABLE=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+      elif command -v wget >/dev/null 2>&1; then
+        STABLE=$(wget -qO- https://dl.k8s.io/release/stable.txt)
+      else
+        STABLE=
+      fi
+
+      if [[ -z "\$STABLE" ]]; then
+        if command -v apt-get >/dev/null 2>&1; then
+          apt-get update && apt-get install -y curl
+          STABLE=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+        elif command -v yum >/dev/null 2>&1; then
+          yum install -y curl
+          STABLE=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+        fi
+      fi
+
+      if [[ -n "\$STABLE" ]]; then
+  KUBECTL_URL="https://dl.k8s.io/release/$STABLE/bin/linux/amd64/kubectl"
+        if command -v curl >/dev/null 2>&1; then
+          curl -Lo /tmp/kubectl "$KUBECTL_URL"
+        elif command -v wget >/dev/null 2>&1; then
+          wget -O /tmp/kubectl "$KUBECTL_URL"
+        fi
+        [ -f /tmp/kubectl ] && { chmod +x /tmp/kubectl && mv /tmp/kubectl /usr/local/bin/kubectl; }
+      else
+        echo "ERROR: Failed to determine kubectl stable release inside container" >&2
+      fi
     fi
-  "
+  '
   
   logger info "Container mode environment ready. Use 'docker exec -it kubeasz-container bash' to access."
   logger info "Then run 'ezctl start-container' to create a KIND-based k8s cluster."
