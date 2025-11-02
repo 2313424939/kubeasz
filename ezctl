@@ -5,6 +5,12 @@
 set -o nounset
 set -o errexit
 #set -o xtrace
+set -o pipefail
+
+# directory where this script resides (resolved at start, before we cd to $BASE)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# the working directory where the script was invoked (before we cd to $BASE)
+INVOKE_PWD="$PWD"
 
 function usage() {
     echo -e "\033[33mUsage:\033[0m ezctl COMMAND [args]"
@@ -488,15 +494,56 @@ function start-container(){
         return 1
     fi
     
-    # Create cluster configuration
-    new container
-    /bin/cp -f example/hosts.container "clusters/container/hosts"
-    /bin/cp -f example/kind-config.yaml "clusters/container/kind-config.yaml"
-    sed -i "s/_cluster_name_/container/g" "clusters/container/hosts"
+        # Create cluster configuration
+        new container
+        # locate example files: prefer $BASE/example, fallback to script dir example
+        SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+                # Prefer example files from the invocation dir, then script dir, fallback to $BASE/example
+                if [[ -f "$INVOKE_PWD/example/hosts.container" ]]; then
+                    /bin/cp -f "$INVOKE_PWD/example/hosts.container" "clusters/container/hosts"
+                elif [[ -f "$SCRIPT_DIR/example/hosts.container" ]]; then
+                    /bin/cp -f "$SCRIPT_DIR/example/hosts.container" "clusters/container/hosts"
+                else
+                    /bin/cp -f "$BASE/example/hosts.container" "clusters/container/hosts"
+                fi
+
+                if [[ -f "$INVOKE_PWD/example/kind-config.yaml" ]]; then
+                    /bin/cp -f "$INVOKE_PWD/example/kind-config.yaml" "clusters/container/kind-config.yaml"
+                elif [[ -f "$SCRIPT_DIR/example/kind-config.yaml" ]]; then
+                    /bin/cp -f "$SCRIPT_DIR/example/kind-config.yaml" "clusters/container/kind-config.yaml"
+                else
+                    /bin/cp -f "$BASE/example/kind-config.yaml" "clusters/container/kind-config.yaml"
+                fi
+
+        sed -i "s/_cluster_name_/container/g" "clusters/container/hosts"
     
-    # Create KIND cluster
-    logger info "Creating KIND cluster..."
-    kind create cluster --config="clusters/container/kind-config.yaml" --name=kubeasz-container
+        # Check for port conflicts before creating KIND cluster
+        PUBLISH_PORTS=(6443 80 443 30000 30001 30002)
+        USED_PORTS=()
+        for p in "${PUBLISH_PORTS[@]}"; do
+            if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ":${p}$"; then
+                USED_PORTS+=("$p")
+            fi
+        done
+        if [[ ${#USED_PORTS[@]} -gt 0 ]]; then
+            logger error "port(s) in use: ${USED_PORTS[*]}. Free these ports or adjust 'clusters/container/kind-config.yaml' to avoid host port mappings before running start-container."
+            return 1
+        fi
+
+        # Create KIND cluster
+            logger info "Creating KIND cluster..."
+            # capture output to detect port-bind failures and provide actionable suggestions
+            if ! (kind create cluster --config="clusters/container/kind-config.yaml" --name=kubeasz-container) 2>&1 | tee /tmp/kind_create_output.$$; then
+                if grep -qi "address already in use\|failed to listen on TCP socket" /tmp/kind_create_output.$$; then
+                    logger error "KIND failed to start due to host port(s) being already in use."
+                    logger info "Ports checked: 6443,80,443,30000-30002. Processes listening on these ports (if any):"
+                    ss -ltnp 2>/dev/null | grep -E ':(6443|80|443|30000|30001|30002)' || true
+                    logger info "Free the conflicting port(s) or edit 'clusters/container/kind-config.yaml' to avoid publishing host ports, then retry."
+                fi
+                rm -f /tmp/kind_create_output.$$ || true
+                return 1
+            fi
+            rm -f /tmp/kind_create_output.$$ || true
     
     # Wait for cluster to be ready
     logger info "Waiting for cluster to be ready..."
@@ -677,8 +724,12 @@ function main() {
   # check bash shell
   readlink /proc/$$/exe|grep -q "bash" || { logger error "you should use bash shell only"; exit 1; }
 
-  # check 'ansible' executable
-  which ansible > /dev/null 2>&1 || { logger error "need 'ansible', try: 'pip install ansible'"; usage; exit 1; }
+    # check 'ansible' executable for commands that require it
+    # Note: some helper commands (like start-container) don't need ansible installed on host,
+    # so skip the global check for those commands to allow running container-mode without ansible.
+    if [[ "$#" -gt 0 && "$1" != "start-container" ]]; then
+        which ansible > /dev/null 2>&1 || { logger error "need 'ansible', try: 'pip install ansible'"; usage; exit 1; }
+    fi
 
   [ "$#" -gt 0 ] || { usage >&2; exit 2; }
 
