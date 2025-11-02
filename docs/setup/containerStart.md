@@ -242,6 +242,47 @@ kind delete cluster --name=kubeasz-container
    docker system prune -f
    ```
 
+  #### 端口冲突导致的启动失败
+
+  KIND 默认示例会把一些常用端口映射到宿主机（如 6443、80、443、30000-30002）。如果这些端口被宿主机上的其他进程占用，KIND 在创建容器时会因为无法绑定主机端口而失败，并出现类似 "address already in use" 的错误。
+
+  解决方法：
+
+  - 检查哪些进程占用了端口（以 6443 为例）：
+
+  ```bash
+  # 推荐：显示监听端口及对应的进程信息
+  ss -ltnp | grep -E ':(6443|80|443|30000|30001|30002)'
+
+  # 或使用 lsof（需安装 lsof）
+  sudo lsof -i :6443
+  ```
+
+  - 停止或移除占用端口的服务，例如 nginx/traefik 等：
+
+  ```bash
+  sudo systemctl stop nginx
+  sudo systemctl disable nginx
+  # 或根据 PID 杀掉进程（谨慎）
+  sudo kill <PID>
+  ```
+
+  - 如果不希望把这些端口映射到宿主机，可以编辑 `clusters/container/kind-config.yaml`，移除或注释 `extraPortMappings` 中对应的 `hostPort` 条目。例如把控制平面节点的映射部分删除或注释掉：
+
+  ```yaml
+    extraPortMappings:
+    # - containerPort: 6443
+    #   hostPort: 6443
+    #   protocol: TCP
+    # - containerPort: 80
+    #   hostPort: 80
+    #   protocol: TCP
+  ```
+
+  修改后重新运行 `ezctl start-container` 或直接使用 `kind create cluster --config=clusters/container/kind-config.yaml --name=kubeasz-container` 进行测试。
+
+  如果仍然遇到问题，请把 `ss -ltnp` 的输出粘贴到 issue/讨论中以便定位。
+
 ### 日志查看
 
 ```bash
