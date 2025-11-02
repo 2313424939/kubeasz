@@ -61,7 +61,8 @@
 
 ## 快速指南
 
-单机快速体验k8s集群的测试环境--[AllinOne部署](docs/setup/quickStart.md)
+- 单机快速体验k8s集群的测试环境--[AllinOne部署](docs/setup/quickStart.md)
+- 容器环境快速部署k8s集群--[容器部署模式](docs/setup/containerStart.md)
 
 ## 安装指南
 

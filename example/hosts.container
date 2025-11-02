@@ -1,0 +1,87 @@
+# Container deployment mode for kubeasz
+# This configuration is designed for running k8s cluster inside containers using KIND
+# Suitable for development, testing, and CI/CD environments
+
+# KIND cluster configuration - using localhost as the target
+[etcd]
+127.0.0.1
+
+# master node(s) - KIND will create virtual nodes
+[kube_master]
+127.0.0.1
+
+# work node(s) - KIND will create virtual nodes  
+[kube_node]
+127.0.0.1 k8s_nodename='kind-worker'
+
+# [optional] harbor server, a private docker registry
+[harbor]
+#127.0.0.1 NEW_INSTALL=false
+
+# [optional] loadbalance for accessing k8s from outside
+[ex_lb]
+#127.0.0.1 LB_ROLE=master EX_APISERVER_VIP=127.0.0.1 EX_APISERVER_PORT=6443
+
+# [optional] ntp server for the cluster
+[chrony]
+#127.0.0.1
+
+[all:vars]
+# --------- Main Variables ---------------
+# Secure port for apiservers
+SECURE_PORT="6443"
+
+# Container deployment mode - use KIND for container-based k8s
+DEPLOYMENT_MODE="container"
+
+# Cluster container-runtime supported: containerd (required for KIND)
+CONTAINER_RUNTIME="containerd"
+
+# Network plugins supported: calico, flannel, kube-router, cilium, kube-ovn
+# For container mode, calico is recommended
+CLUSTER_NETWORK="calico"
+
+# Service proxy mode of kube-proxy: 'iptables' or 'ipvs'
+PROXY_MODE="iptables"
+
+# K8S Service CIDR, not overlap with node(host) networking
+SERVICE_CIDR="10.96.0.0/16"
+
+# Cluster CIDR (Pod CIDR), not overlap with node(host) networking
+CLUSTER_CIDR="10.244.0.0/16"
+
+# NodePort Range
+NODE_PORT_RANGE="30000-32767"
+
+# Cluster DNS Domain
+CLUSTER_DNS_DOMAIN="cluster.local"
+
+# KIND specific configurations
+KIND_CLUSTER_NAME="kubeasz-container"
+KIND_NODE_IMAGE="kindest/node:v1.31.0"
+KIND_CONFIG_PATH="/tmp/kind-config.yaml"
+
+# -------- Additional Variables (don't change the default value right now)---
+# Binaries Directory
+bin_dir="/opt/kube/bin"
+
+# Deploy Directory (kubeasz workspace)
+base_dir="/etc/kubeasz"
+
+# Directory for a specific cluster
+cluster_dir="{{ base_dir }}/clusters/_cluster_name_"
+
+# CA and other components cert/key Directory
+ca_dir="/etc/kubernetes/ssl"
+
+# Default 'k8s_nodename' is empty
+k8s_nodename=''
+
+# Default python interpreter
+ansible_python_interpreter=/usr/bin/python3
+
+# Container mode specific settings
+SKIP_SYSTEM_PREPARE=true
+SKIP_ETCD_INSTALL=true
+SKIP_RUNTIME_INSTALL=true
+USE_KIND_CLUSTER=true

@@ -22,6 +22,7 @@ Cluster setups:
     backup      <cluster>            to backup the cluster state (etcd snapshot)
     restore     <cluster>            to restore the cluster state from backups
     start-aio		             to quickly setup an all-in-one cluster with default settings
+    start-container	             to quickly setup a k8s cluster in container mode using KIND
 
 Cluster ops:
     add-etcd    <cluster>  <ip>      to add a etcd-node to the etcd cluster
@@ -466,6 +467,99 @@ function start-aio(){
     setup default all
 }
 
+function start-container(){
+    logger info "Starting container-based k8s cluster deployment using KIND"
+    
+    # Check if KIND is installed
+    if ! command -v kind &> /dev/null; then
+        logger info "KIND not found, installing KIND..."
+        install_kind
+    fi
+    
+    # Check if kubectl is installed
+    if ! command -v kubectl &> /dev/null; then
+        logger info "kubectl not found, installing kubectl..."
+        install_kubectl
+    fi
+    
+    # Check if docker is running
+    if ! docker info &> /dev/null; then
+        logger error "Docker is not running. Please start Docker first."
+        return 1
+    fi
+    
+    # Create cluster configuration
+    new container
+    /bin/cp -f example/hosts.container "clusters/container/hosts"
+    /bin/cp -f example/kind-config.yaml "clusters/container/kind-config.yaml"
+    sed -i "s/_cluster_name_/container/g" "clusters/container/hosts"
+    
+    # Create KIND cluster
+    logger info "Creating KIND cluster..."
+    kind create cluster --config="clusters/container/kind-config.yaml" --name=kubeasz-container
+    
+    # Wait for cluster to be ready
+    logger info "Waiting for cluster to be ready..."
+    kubectl wait --for=condition=Ready nodes --all --timeout=300s
+    
+    # Setup kubeconfig
+    kind export kubeconfig --name=kubeasz-container
+    
+    # Apply basic cluster setup (network plugins, addons, etc.)
+    logger info "Setting up cluster components..."
+    setup-container-components container
+    
+    logger info "Container-based k8s cluster is ready!"
+    logger info "You can access the cluster using: kubectl cluster-info"
+}
+
+function install_kind(){
+    logger info "Installing KIND..."
+    # Download KIND binary
+    curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+    chmod +x ./kind
+    mv ./kind /usr/local/bin/kind
+    logger info "KIND installed successfully"
+}
+
+function install_kubectl(){
+    logger info "Installing kubectl..."
+    # Download kubectl
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    chmod +x kubectl
+    mv kubectl /usr/local/bin/kubectl
+    logger info "kubectl installed successfully"
+}
+
+function setup-container-components(){
+    local cluster_name=$1
+    logger info "Setting up cluster components for container mode..."
+    
+    # Apply Calico network plugin
+    logger info "Installing Calico network plugin..."
+    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.4/manifests/tigera-operator.yaml
+    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.4/manifests/custom-resources.yaml
+    
+    # Wait for Calico to be ready
+    kubectl wait --for=condition=Ready pods -l k8s-app=calico-node -n calico-system --timeout=300s
+    
+    # Install metrics-server
+    logger info "Installing metrics-server..."
+    kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+    
+    # Patch metrics-server for KIND
+    kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]'
+    
+    # Install ingress-nginx
+    logger info "Installing ingress-nginx..."
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+    
+    # Wait for ingress controller to be ready
+    kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=300s
+    
+    logger info "All cluster components installed successfully"
+}
+
 ### Extra functions #############################################
 function renew-ca() {
     [[ -d "clusters/$1" ]] || { logger error "invalid cluster, run 'ezctl new $1' first"; return 1; }
@@ -658,6 +752,10 @@ function main() {
       (start-aio)
           [ "$#" -eq 1 ] || { usage >&2; exit 2; }
           start-aio
+          ;;
+      (start-container)
+          [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+          start-container
           ;;
       ### extra operations ##############################
       (kca-renew)
