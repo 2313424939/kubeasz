@@ -124,19 +124,19 @@ function test_demo_script() {
     log_info "测试演示脚本..."
     
     # 检查演示脚本是否存在
-    if [ ! -f "demo-container.sh" ]; then
+    if [ ! -f "tools/container-mode/demo-container.sh" ]; then
         log_error "演示脚本不存在"
         return 1
     fi
     
     # 检查脚本是否可执行
-    if [ ! -x "demo-container.sh" ]; then
+    if [ ! -x "tools/container-mode/demo-container.sh" ]; then
         log_error "演示脚本不可执行"
         return 1
     fi
     
     # 检查脚本语法
-    if ! bash -n demo-container.sh; then
+    if ! bash -n tools/container-mode/demo-container.sh; then
         log_error "演示脚本语法错误"
         return 1
     fi
