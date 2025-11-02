@@ -252,7 +252,7 @@ function setup() {
         open(td + '/installations-crd.yaml', 'w', encoding='utf-8').write(crd)
     open(td + '/tigera-no-installations.yaml', 'w', encoding='utf-8').write('\n---\n'.join(rest))
     print('SPLIT_DONE')
-    PY
+PY
                 # If CRD exists in manifest and not on cluster, create it first
                 if [[ -f "$TMPDIR/installations-crd.yaml" ]]; then
                     if ! kubectl get crd installations.operator.tigera.io >/dev/null 2>&1; then
@@ -295,16 +295,23 @@ function setup() {
                     if grep -q "metadata.annotations: Too long" /tmp/tigera_apply.$$ 2>/dev/null || grep -qi "Too long: must have at most" /tmp/tigera_apply.$$ 2>/dev/null; then
                         logger warn "apply failed due to large annotation; attempt to extract CRD and retry"
                         # attempt to extract installations CRD as a fallback and create it
-                        python3 - <<'PY'
-    import os
-    text=open(os.environ['TMPDIR']+'/tigera.yaml','r',encoding='utf-8').read()
-      (destroy)
-    for d in docs:
-        if 'installations.operator.tigera.io' in d:
-            open(os.environ['TMPDIR']+'/installations-crd.yaml','w',encoding='utf-8').write(d)
-            break
-    print('EXTRACTED')
-    PY
+                        # attempt to extract installations CRD from downloaded manifest into a separate file
+                        # split the manifest into docs and find the CRD doc for installations.operator.tigera.io
+                        awk 'BEGIN{n=0;file=sprintf("%s/doc_%03d.yaml", ENVIRON["TMPDIR"], n)}
+                             /^---/ { n++; file=sprintf("%s/doc_%03d.yaml", ENVIRON["TMPDIR"], n); next }
+                             { print $0 >> file }' TMPDIR="$TMPDIR" "$TMPDIR/tigera.yaml"
+                        CRD_FILE=""
+                        for f in "$TMPDIR"/doc_*.yaml; do
+                            if grep -q -E "^kind:\\s*CustomResourceDefinition" "$f" 2>/dev/null && \
+                               grep -q "installations.operator.tigera.io" "$f" 2>/dev/null; then
+                                CRD_FILE="$f"
+                                break
+                            fi
+                        done
+                        if [[ -n "$CRD_FILE" ]]; then
+                            cp "$CRD_FILE" "$TMPDIR/installations-crd.yaml" || true
+                        fi
+                        echo 'EXTRACTED'
                         if [[ -f "$TMPDIR/installations-crd.yaml" ]]; then
                             kubectl create -f "$TMPDIR/installations-crd.yaml" || true
                             if [[ -s "$TMPDIR/tigera-no-installations.yaml" ]]; then
